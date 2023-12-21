@@ -179,6 +179,8 @@ def add_snowfall(snowfall_i, sf_mean, mass, dz, rho, rhos, Tz, Ts, dti):
     
     ### advect temperature by taking weighted mean of layer mass/temperature and mass/temperature of firn being fluxed in
     T_temp = np.append(Ts, Tz[:-1])  # helper vector for calculations
+    T_out = Tz[-1] # temperature of firn being fluxed out bottom of column
+
     Tz[:-1]  = ((mass_new*T_temp[:-1]) + (Tz[:-1]*(mass[:-1]-mass_new))) / mass[:-1] 
     Tz[-1]  = ((mass_new*T_temp[-1]) + (Tz[-1]*(mass[-1]-mass_out))) / (mass[-1] + mass_new - mass_out) # slightly different for bottom because mass out is different than mass in 
     
@@ -188,7 +190,7 @@ def add_snowfall(snowfall_i, sf_mean, mass, dz, rho, rhos, Tz, Ts, dti):
     rho = mass/dz
     z = np.append(0,np.cumsum(dz))
 
-    return dz, rho, z, mass_out/dti
+    return dz, rho, z, mass_out/dti, T_out
 ### end add_snowfall ###
 ########################
 
@@ -245,7 +247,7 @@ def generate_restarts(dz, forcings, repetitions=40, heat_diffusion=True, save_re
         dz = mass/rho
         z = np.append(0,np.cumsum(dz))
         ### then add new accumulation and adjust grid
-        dz, rho, z, mass_out = add_snowfall(snowfall_spin[jj], sf_mean, mass, dz, rho, forcings['rhos'], Tz, Tskin_spin[jj],dts)
+        dz, rho, z, mass_out, T_out = add_snowfall(snowfall_spin[jj], sf_mean, mass, dz, rho, forcings['rhos'], Tz, Tskin_spin[jj],dts)
         if heat_diffusion:
             Tz = HeatDiffusion(z, dz, dts, Tz, rho)
     if save_restart:
@@ -323,11 +325,11 @@ class MINICFM:
         self.dz = self.mass/self.rho
         self.z = np.append(0,np.cumsum(self.dz))
         ### then add new accumulation, flux out bottom, and adjust grid
-        self.dz, self.rho, self.z, mass_out = add_snowfall(self.snowfall[iii], self.sf_mean, self.mass, self.dz, self.rho, self.rhos,self.Tz, self.Tskin[iii], dti)
+        self.dz, self.rho, self.z, mass_out, T_out = add_snowfall(self.snowfall[iii], self.sf_mean, self.mass, self.dz, self.rho, self.rhos,self.Tz, self.Tskin[iii], dti)
         if heat_diffusion:
             self.Tz = HeatDiffusion(self.z, self.dz, dti, self.Tz, self.rho)
         
-        return self.dz,self.rho,self.mass,self.Tz, mass_out
+        return self.dz,self.rho,self.mass,self.Tz, mass_out, T_out
     ### end miniCFM ###
     ###################
 
@@ -393,9 +395,11 @@ if __name__ == '__main__':
     rdict = {} # results dictionary
     rdict['rho'] = np.ones((len(modeltimes)-1,len(cmini.dz)))
     rdict['dz'] = np.ones((len(modeltimes)-1,len(cmini.dz)))
+    rdict['z'] = np.ones((len(modeltimes)-1,len(cmini.dz)))
     rdict['mass'] = np.ones((len(modeltimes)-1,len(cmini.dz)))
     rdict['Tz'] = np.ones((len(modeltimes)-1,len(cmini.dz)))
     rdict['mass_out'] = np.ones(len(modeltimes)-1)
+    rdict['T_out'] = np.ones(len(modeltimes)-1)
     rdict['modeltime'] = []
 
     for iii,dti in enumerate(dt): # time stepping model loop
@@ -403,7 +407,7 @@ if __name__ == '__main__':
         ts = pd.to_datetime(modeltime) 
         d = ts.strftime('%Y.%m.%d')
 
-        dz, rho, mass, Tz, mass_out = cmini.miniCFM(iii,dti) # run the model for this time step
+        dz, rho, mass, Tz, mass_out, T_out = cmini.miniCFM(iii,dti) # run the model for this time step
         
         ### example: save a restart at some timestep
         if iii==400: 
@@ -416,11 +420,13 @@ if __name__ == '__main__':
             cmini.dz = cmini.mass / cmini.rho # need to make sure that layer mass/dz/density stay self consistent. Currently coded so that layer mass is constant.
         
         ### put time step outputs in results dictionary
-        rdict['rho'][iii,:]  = cmini.rho
-        rdict['mass'][iii,:] = cmini.mass
-        rdict['dz'][iii,:]   = cmini.dz
-        rdict['Tz'][iii,:]   = cmini.Tz
-        rdict['mass_out'][iii] = mass_out
+        rdict['rho'][iii,:]  = cmini.rho  # density of each firn layer
+        rdict['mass'][iii,:] = cmini.mass # mass of each firn layer
+        rdict['dz'][iii,:]   = cmini.dz   # thickness of each firn layer
+        rdict['z'][iii,:]    = np.cumsum(cmini.dz)   # depth of bottom each firn layer; tops of layers is np.append(0,z[:-1])
+        rdict['Tz'][iii,:]   = cmini.Tz   # temperature of each firn layer
+        rdict['mass_out'][iii] = mass_out # mass of firn being fluxed out bottom of column at each time step (i.e., into the ice sheet)
+        rdict['T_out'][iii] = T_out       # temperature of firn being fluxed out bottom of column at each time step (i.e., into the ice sheet)
         rdict['modeltime'].append(d)
     ############
     
@@ -431,9 +437,11 @@ if __name__ == '__main__':
         data_vars = dict(
             rho  = (["time","layers"],rdict['rho'], {"units":'kg/m3'}),
             dz   = (["time","layers"],rdict['dz'], {"units":'m'}),
+            z    = (["time","layers"],rdict['z'], {"units":'m'}),
             mass = (["time","layers"],rdict['mass'], {"units":'kg'}),
             Tz   = (["time","layers"],rdict['Tz'], {"units":'K'}),
             flux_out = (["time"],rdict['mass_out'], {"units":'kg'}),
+            temperature_out = (["time"],rdict['T_out'], {"units":'K'}),
             ),
         coords = dict(
         layers = (["layers"],layers),
